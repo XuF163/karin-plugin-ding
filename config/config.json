@@ -1,0 +1,25 @@
+{
+  "enableDingAdapter": true,
+  "debugGlobal": false,
+  "enablePublicImageBed": false,
+  "defaultWebhook": "",
+  "dingdingAccounts": [
+    {
+      "enable": false,
+      "accountId": "default",
+      "botName": "DingTalkBot",
+      "botAvatar": "",
+      "clientId": "",
+      "clientSecret": "",
+      "corpId": "",
+      "robotCode": "",
+      "webhook": "",
+      "webhookSecret": "",
+      "enableOpenApiDownload": true,
+      "enableOpenApiSend": false,
+      "keepAlive": true,
+      "autoReconnect": true,
+      "extraTopics": []
+    }
+  ]
+}
