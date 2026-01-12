@@ -136,3 +136,7 @@ build
 tmp/
 .ace-tool/
 @karinjs/karin-plugin-ding/config/config.json
+@karinjs/karin-plugin-ling
+@karinjs/@karinjs-plugin-puppeteer
+lib/
+@karinjs/data
