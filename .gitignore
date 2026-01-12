@@ -135,3 +135,4 @@ build
 # Temporary resources
 tmp/
 .ace-tool/
+@karinjs/karin-plugin-ding/config/config.json

@@ -9,6 +9,8 @@ import {
   contactGroup,
   createFriendMessage,
   createGroupMessage,
+  fileToUrl,
+  karin,
   senderFriend,
   senderGroup,
   logger,
@@ -24,6 +26,7 @@ import { SessionWebhookCache } from './sessionWebhookCache'
 import { safeJsonParse, toStr, uniq } from './utils'
 import { ProactiveWebhookBinding } from './webhookBinding'
 import { sendWebhookImage, sendWebhookMarkdown, sendWebhookText } from './webhook'
+import { buildDingtalkNoticeEvent, sanitizeEventSegment } from './notice'
 
 export class DingTalkBot extends AdapterBase<DWClient> {
   public readonly accountId: string
@@ -40,6 +43,7 @@ export class DingTalkBot extends AdapterBase<DWClient> {
 
   private readonly sessionWebhookCache: SessionWebhookCache
   private readonly webhookBinding: ProactiveWebhookBinding
+  private lastRecallHintAt = 0
 
   constructor (params: {
     globalConfig: Config
@@ -230,17 +234,12 @@ export class DingTalkBot extends AdapterBase<DWClient> {
   }
 
   private async handleStreamEvent (topic: string, streamEvent: any) {
-    if (topic !== TOPIC_ROBOT && topic !== TOPIC_ROBOT_DELEGATE) {
-      // TODO: card callback / other topics -> notice event
-      return
-    }
-
     const raw = toStr(streamEvent?.data?.toString?.('utf8') ?? '')
     if (!raw) return
 
     const parsed = safeJsonParse<any>(raw)
     if (!parsed.ok) {
-      logger.bot('warn', this.selfId, `[recv] invalid json: ${parsed.error.message}`)
+      logger.bot('warn', this.selfId, `[recv:${topic}] invalid json: ${parsed.error.message}`)
       return
     }
 
@@ -248,6 +247,11 @@ export class DingTalkBot extends AdapterBase<DWClient> {
 
     this.openApi.updateFromCallbackData(data)
     this.updateSessionWebhookCacheFromEvent(data)
+
+    if (topic !== TOPIC_ROBOT && topic !== TOPIC_ROBOT_DELEGATE) {
+      this.dispatchNoticeEvent(topic, data, raw, streamEvent)
+      return
+    }
 
     const segments = parseMessageSegments(data)
     await this.enrichIncomingMedia(segments, data)
@@ -285,7 +289,7 @@ export class DingTalkBot extends AdapterBase<DWClient> {
         messageId,
         messageSeq: Number.isFinite(createAt) ? createAt : Date.now(),
         elements,
-        srcReply: (els) => this.sendMsg(contact, els),
+        srcReply: (els) => this.sendMsg(contact, els, 0, { preferOpenApi: this.canUseOpenApiSend() }),
       })
       return
     }
@@ -310,8 +314,34 @@ export class DingTalkBot extends AdapterBase<DWClient> {
       messageId,
       messageSeq: Number.isFinite(createAt) ? createAt : Date.now(),
       elements,
-      srcReply: (els) => this.sendMsg(contact, els),
+      srcReply: (els) => this.sendMsg(contact, els, 0, { preferOpenApi: this.canUseOpenApiSend() }),
     })
+  }
+
+  private dispatchNoticeEvent (topic: string, data: any, raw: string, streamEvent: any) {
+    try {
+      const noticeType = topic === TOPIC_CARD_CALLBACK ? 'dingtalk_card' : 'dingtalk_event'
+      const e = buildDingtalkNoticeEvent({
+        botId: this.selfId,
+        accountId: this.accountId,
+        topic,
+        noticeType,
+        data,
+        raw,
+        adapter: { id: this.adapter.name, name: this.adapter.name, version: this.adapter.version },
+        streamEvent,
+      })
+
+      const seg = sanitizeEventSegment(topic)
+      const eventName = noticeType === 'dingtalk_card'
+        ? `notice.dingtalk.card.${seg}`
+        : `notice.dingtalk.event.${seg}`
+
+      karin.emit(eventName, e)
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.bot('error', this.selfId, `[recv:${topic}] dispatch notice error: ${msg}`)
+    }
   }
 
   private resolveWebhook (contact: Contact): { webhook: string, secret?: string } | null {
@@ -344,7 +374,13 @@ export class DingTalkBot extends AdapterBase<DWClient> {
     return this.accountConfig.enablePublicImageBed ?? this.globalConfig.enablePublicImageBed ?? false
   }
 
-  async sendMsg (contact: Contact, elements: Elements[], _retryCount = 0): Promise<SendMsgResults> {
+  async sendMsg (
+    contact: Contact,
+    elements: Elements[],
+    _retryCount = 0,
+    options?: { preferOpenApi?: boolean },
+  ): Promise<SendMsgResults> {
+    const preferOpenApi = options?.preferOpenApi === true
     const atUserIds = new Set<string>()
     let isAtAll = false
     const textParts: string[] = []
@@ -380,29 +416,16 @@ export class DingTalkBot extends AdapterBase<DWClient> {
     const nowSec = Math.floor(Date.now() / 1000)
     let lastMessageId = ''
 
-    const sendText = async (content: string) => {
-      if (webhookCtx?.webhook) {
-        const resp = await sendWebhookText({
-          webhook: webhookCtx.webhook,
-          secret: webhookCtx.secret,
-          content: content || ' ',
-          at: { atUserIds: Array.from(atUserIds), isAtAll },
-        })
-        responses.push(resp)
-        lastMessageId = `${this.selfId}_${Date.now()}`
-        return
-      }
-
-      if (!this.canUseOpenApiSend()) throw new Error('[dingtalk] no available webhook, and enableOpenApiSend=false')
-
+    const sendOpenApiMessage = async (payload: { kind: 'text' | 'markdown', content: string, title?: string }) => {
       const robotCode = this.resolveRobotCodeFromEvent({})
       if (!robotCode) throw new Error('[dingtalk] OpenAPI send requires robotCode (config or callback)')
 
       if (contact.scene === 'group') {
         const resp = await this.openApi.sendGroupMessage({
           openConversationId: contact.peer,
-          kind: 'text',
-          content,
+          kind: payload.kind,
+          content: payload.content,
+          title: payload.title,
           robotCode,
         })
         responses.push(resp)
@@ -413,8 +436,9 @@ export class DingTalkBot extends AdapterBase<DWClient> {
       if (contact.scene === 'friend') {
         const resp = await this.openApi.batchSendOtoMessage({
           userIds: [contact.peer],
-          kind: 'text',
-          content,
+          kind: payload.kind,
+          content: payload.content,
+          title: payload.title,
           robotCode,
         })
         responses.push(resp)
@@ -425,84 +449,181 @@ export class DingTalkBot extends AdapterBase<DWClient> {
       throw new Error(`[dingtalk] unsupported contact.scene=${contact.scene}`)
     }
 
-    const sendImage = async (file: string) => {
-      const clean = toStr(file).trim()
-      if (!clean) return
+    const sendText = async (content: string) => {
+      const payload = content || ' '
+
+      if (preferOpenApi && this.canUseOpenApiSend()) {
+        try {
+          await sendOpenApiMessage({ kind: 'text', content: payload })
+          return
+        } catch (error: unknown) {
+          if (!webhookCtx?.webhook) throw error
+          const msg = error instanceof Error ? error.message : String(error)
+          logger.bot('warn', this.selfId, `[send] OpenAPI text send failed, fallback to webhook: ${msg}`)
+        }
+      }
 
       if (webhookCtx?.webhook) {
-        if (this.enablePublicImageBed && /^https?:\/\//i.test(clean)) {
-          const resp = await sendWebhookMarkdown({
-            webhook: webhookCtx.webhook,
-            secret: webhookCtx.secret,
-            title: '图片',
-            text: `![图片](${clean})\n`,
-          })
-          responses.push(resp)
-          lastMessageId = `${this.selfId}_${Date.now()}`
-          return
-        }
-
-        const info = await fileToBuffer(clean, `image_${Date.now()}`)
-        const base64 = info.buffer.toString('base64')
-        const md5 = crypto.createHash('md5').update(info.buffer).digest('hex')
-        const resp = await sendWebhookImage({
+        const resp = await sendWebhookText({
           webhook: webhookCtx.webhook,
           secret: webhookCtx.secret,
-          base64,
-          md5,
+          content: payload,
+          at: { atUserIds: Array.from(atUserIds), isAtAll },
         })
         responses.push(resp)
         lastMessageId = `${this.selfId}_${Date.now()}`
         return
       }
 
-      if (!this.canUseOpenApiSend()) {
-        // 无可用发送链路：降级为文本提示
-        await sendText('[图片]')
-        return
+      if (!this.canUseOpenApiSend()) throw new Error('[dingtalk] no available webhook, and enableOpenApiSend=false')
+      await sendOpenApiMessage({ kind: 'text', content: payload })
+    }
+
+    const sendImage = async (file: string) => {
+      const clean = toStr(file).trim()
+      if (!clean) return
+
+      const maxWebhookImageBytes = 15 * 1024
+
+      const tryGetPublicUrl = async (): Promise<string | null> => {
+        if (/^https?:\/\//i.test(clean)) return clean
+        try {
+          const info = await fileToBuffer(clean, `image_${Date.now()}`)
+          const res = await fileToUrl('image', info.buffer, info.name)
+          const url = toStr((res as any)?.url).trim()
+          if (/^https?:\/\//i.test(url)) return url
+        } catch {
+          // ignore
+        }
+        return null
       }
 
-      const robotCode = this.resolveRobotCodeFromEvent({})
-      if (!robotCode) {
-        await sendText('[图片]')
-        return
+      const sendMarkdownImageByWebhook = async (url: string) => {
+        const resp = await sendWebhookMarkdown({
+          webhook: webhookCtx!.webhook,
+          secret: webhookCtx?.secret,
+          title: '图片',
+          text: `![图片](${url})\n`,
+          at: { atUserIds: Array.from(atUserIds), isAtAll },
+        })
+        responses.push(resp)
+        lastMessageId = `${this.selfId}_${Date.now()}`
       }
 
-      // OpenAPI: photoURL 可为 URL 或 media_id；这里优先用 URL，否则 media/upload 再发
-      let photoURL = clean
-      if (!/^https?:\/\//i.test(clean)) {
+      const sendBase64ImageByWebhook = async () => {
         const info = await fileToBuffer(clean, `image_${Date.now()}`)
-        photoURL = await this.oapi.uploadMedia({
-          type: 'image',
-          buffer: info.buffer,
-          fileName: info.name,
-          mimeType: info.mimeType,
-        })
-      }
+        if (info.buffer.length > maxWebhookImageBytes) {
+          throw new Error(`[dingtalk] webhook image too large: ${info.buffer.length} bytes`)
+        }
 
-      if (contact.scene === 'group') {
-        const resp = await this.openApi.sendGroupImageMessage({
-          openConversationId: contact.peer,
-          photoURL,
-          robotCode,
+        const base64 = info.buffer.toString('base64')
+        const md5 = crypto.createHash('md5').update(info.buffer).digest('hex')
+        const resp = await sendWebhookImage({
+          webhook: webhookCtx!.webhook,
+          secret: webhookCtx?.secret,
+          base64,
+          md5,
         })
         responses.push(resp)
-        lastMessageId = toStr(resp?.processQueryKey || resp?.process_query_key) || `${this.selfId}_${Date.now()}`
+        lastMessageId = `${this.selfId}_${Date.now()}`
+      }
+
+      const sendImageByOpenApi = async () => {
+        const robotCode = this.resolveRobotCodeFromEvent({})
+        if (!robotCode) throw new Error('[dingtalk] OpenAPI image send requires robotCode (config or callback)')
+
+        // OpenAPI: photoURL can be URL or media_id; prefer URL, otherwise upload via OAPI.
+        let photoURL = clean
+        if (!/^https?:\/\//i.test(clean)) {
+          const info = await fileToBuffer(clean, `image_${Date.now()}`)
+          photoURL = await this.oapi.uploadMedia({
+            type: 'image',
+            buffer: info.buffer,
+            fileName: info.name,
+            mimeType: info.mimeType,
+          })
+        }
+
+        if (contact.scene === 'group') {
+          const resp = await this.openApi.sendGroupImageMessage({
+            openConversationId: contact.peer,
+            photoURL,
+            robotCode,
+          })
+          responses.push(resp)
+          lastMessageId = toStr(resp?.processQueryKey || resp?.process_query_key) || `${this.selfId}_${Date.now()}`
+          return
+        }
+
+        if (contact.scene === 'friend') {
+          const resp = await this.openApi.batchSendOtoImageMessage({
+            userIds: [contact.peer],
+            photoURL,
+            robotCode,
+          })
+          responses.push(resp)
+          lastMessageId = toStr(resp?.processQueryKey || resp?.process_query_key) || `${this.selfId}_${Date.now()}`
+          return
+        }
+
+        throw new Error(`[dingtalk] unsupported contact.scene=${contact.scene}`)
+      }
+
+      if (webhookCtx?.webhook) {
+        // enablePublicImageBed=true: prefer Markdown image (requires public URL)
+        if (this.enablePublicImageBed) {
+          const url = await tryGetPublicUrl()
+          if (url) {
+            await sendMarkdownImageByWebhook(url)
+            return
+          }
+        } else {
+          // enablePublicImageBed=false: prefer media/upload + OpenAPI image message (no public URL required)
+          try {
+            await sendImageByOpenApi()
+            return
+          } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error)
+            logger.bot('warn', this.selfId, `[send] OpenAPI image send failed, fallback to webhook: ${msg}`)
+          }
+        }
+
+        // fallback: tiny image -> webhook image(base64+md5)
+        try {
+          await sendBase64ImageByWebhook()
+          return
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : String(error)
+          logger.bot('warn', this.selfId, `[send] webhook image(base64) failed: ${msg}`)
+        }
+
+        // fallback: if public URL is available, try Markdown image
+        const url = await tryGetPublicUrl()
+        if (url) {
+          try {
+            await sendMarkdownImageByWebhook(url)
+            return
+          } catch {
+            // ignore
+          }
+        }
+
+        await sendText('[图片]')
         return
       }
 
-      if (contact.scene === 'friend') {
-        const resp = await this.openApi.batchSendOtoImageMessage({
-          userIds: [contact.peer],
-          photoURL,
-          robotCode,
-        })
-        responses.push(resp)
-        lastMessageId = toStr(resp?.processQueryKey || resp?.process_query_key) || `${this.selfId}_${Date.now()}`
-        return
+      if (!this.canUseOpenApiSend()) throw new Error('[dingtalk] no available webhook, and enableOpenApiSend=false')
+
+      // no webhook: try Markdown image (if public URL is available), otherwise fallback to OpenAPI image
+      if (this.enablePublicImageBed) {
+        const url = await tryGetPublicUrl()
+        if (url) {
+          await sendOpenApiMessage({ kind: 'markdown', title: '图片', content: `![图片](${url})\n` })
+          return
+        }
       }
 
-      await sendText('[图片]')
+      await sendImageByOpenApi()
     }
 
     const text = textParts.join('').trim()
@@ -525,7 +646,58 @@ export class DingTalkBot extends AdapterBase<DWClient> {
     return { messageId: res.messageId, forwardId: res.messageId }
   }
 
-  async recallMsg (_contact: Contact, _messageId: string): Promise<void> {
-    // DingTalk webhook does not support recalling messages; keep no-op to avoid crashing scheduled recall.
+  async recallMsg (contact: Contact, messageId: string): Promise<void> {
+    const raw = toStr(messageId).trim()
+    if (!raw) return
+
+    const explicit = /^openapi:/i.test(raw)
+    const key = raw.replace(/^openapi:/i, '').trim()
+    if (!key) return
+
+    const looksLikeWebhookSendId = raw.startsWith(`${this.selfId}_`)
+    if (looksLikeWebhookSendId && !explicit) {
+      const now = Date.now()
+      if (now - this.lastRecallHintAt > 60_000) {
+        this.lastRecallHintAt = now
+        logger.bot('warn', this.selfId, '[recall] skip: non-OpenAPI messageId (webhook sends cannot be recalled).')
+      }
+      return
+    }
+
+    const robotCode = this.resolveRobotCodeFromEvent({})
+    if (!robotCode) {
+      logger.bot('warn', this.selfId, '[recall] missing robotCode, skip')
+      return
+    }
+
+    try {
+      if (contact.scene === 'group') {
+        const resp = await this.openApi.recallGroupMessages({
+          openConversationId: contact.peer,
+          processQueryKeys: [key],
+          robotCode,
+        })
+        const ok = resp?.success ?? resp?.result ?? resp?.data?.success ?? resp?.data?.result
+        if (typeof ok === 'boolean' && !ok) {
+          throw new Error(`[OpenAPI] groupMessages/recall returned success=false: ${JSON.stringify(resp)}`)
+        }
+        return
+      }
+
+      if (contact.scene === 'friend') {
+        const resp = await this.openApi.recallOtoMessages({
+          processQueryKeys: [key],
+          robotCode,
+        })
+        const ok = resp?.success ?? resp?.result ?? resp?.data?.success ?? resp?.data?.result
+        if (typeof ok === 'boolean' && !ok) {
+          throw new Error(`[OpenAPI] otoMessages/batchRecall returned success=false: ${JSON.stringify(resp)}`)
+        }
+        return
+      }
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.bot('warn', this.selfId, `[recall] failed: ${msg}`)
+    }
   }
 }

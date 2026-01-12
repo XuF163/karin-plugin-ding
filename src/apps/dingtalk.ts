@@ -1,5 +1,21 @@
-import { karin } from 'node-karin'
+import { karin, contactFriend, contactGroup } from 'node-karin'
 import { getDingTalkService } from '@/dingtalk/service'
+
+export const dingtalkHelp = karin.command(/^#?ding\s+help$/i, async (e) => {
+  await e.reply([
+    'DingTalk Adapter Commands:',
+    '- #ding status',
+    '- #ding bind <webhook> [secret]',
+    '- #ding unbind [groupId]',
+    '- #ding recall <processQueryKey>  （仅 OpenAPI 发送可撤回）',
+    '- #ding send group <openConversationId> <text>',
+    '- #ding send friend <userId> <text>',
+  ].join('\n'))
+  return true
+}, {
+  name: 'DingTalk 帮助',
+  permission: 'master',
+})
 
 export const dingtalkStatus = karin.command(/^#?ding\s+status$/i, async (e) => {
   const service = getDingTalkService()
@@ -20,6 +36,61 @@ export const dingtalkStatus = karin.command(/^#?ding\s+status$/i, async (e) => {
   return true
 }, {
   name: 'DingTalk 状态',
+  permission: 'master',
+})
+
+export const dingtalkRecall = karin.command(/^#?ding\s+recall(?:\s+(.+))?$/i, async (e) => {
+  const service = getDingTalkService()
+  const bot = service.getBotBySelfId(e.selfId)
+  if (!bot) {
+    await e.reply('请在钉钉会话内执行（selfId= DingDing_<accountId>），或自行在代码中调用 bot.recallMsg。')
+    return true
+  }
+
+  const arg = e.msg.replace(/^#?ding\s+recall/i, '').trim()
+  if (!arg) {
+    await e.reply('用法：#ding recall <processQueryKey>\n提示：仅 OpenAPI 发送返回的 processQueryKey 可撤回')
+    return true
+  }
+
+  await bot.recallMsg(e.contact, arg)
+  await e.reply('已提交撤回请求（仅 OpenAPI 发送可用）。')
+  return true
+}, {
+  name: 'DingTalk 撤回',
+  permission: 'master',
+})
+
+export const dingtalkSend = karin.command(/^#?ding\s+send\s+(.+)$/i, async (e) => {
+  const service = getDingTalkService()
+  const bot = service.getBotBySelfId(e.selfId)
+  if (!bot) {
+    await e.reply('请在钉钉会话内执行（selfId= DingDing_<accountId>）。')
+    return true
+  }
+
+  const rest = e.msg.replace(/^#?ding\s+send\s+/i, '').trim()
+  const parts = rest.split(/\s+/)
+  const kind = (parts.shift() || '').toLowerCase()
+
+  if (kind !== 'group' && kind !== 'friend') {
+    await e.reply('用法：\n- #ding send group <openConversationId> <text>\n- #ding send friend <userId> <text>')
+    return true
+  }
+
+  const targetId = parts.shift() || ''
+  const text = parts.join(' ').trim()
+  if (!targetId || !text) {
+    await e.reply('用法：\n- #ding send group <openConversationId> <text>\n- #ding send friend <userId> <text>')
+    return true
+  }
+
+  const contact = kind === 'group' ? contactGroup(targetId, targetId) : contactFriend(targetId, targetId)
+  const res = await bot.sendMsg(contact, [{ type: 'text', text } as any])
+  await e.reply(`已发送：messageId=${res.messageId}`)
+  return true
+}, {
+  name: 'DingTalk 主动发送',
   permission: 'master',
 })
 

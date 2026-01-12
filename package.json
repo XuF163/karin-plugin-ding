@@ -1,7 +1,7 @@
 {
   "name": "karin-plugin-ding",
   "version": "1.0.0",
-  "author": "shijin",
+  "author": "429",
   "type": "module",
   "description": "DingTalk Stream adapter plugin for Karin",
   "homepage": "https://github.com/KarinJS/karin",
@@ -36,6 +36,8 @@
   },
   "karin": {
     "main": "src/index.ts",
+    "web": "lib/web.config.js",
+    "ts-web": "src/web.config.ts",
     "apps": [
       "lib/apps"
     ],

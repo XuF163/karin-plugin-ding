@@ -296,4 +296,48 @@ export class DingTalkOpenApiClient {
       },
     })
   }
+
+  async recallGroupMessages (params: {
+    openConversationId: string
+    processQueryKeys: string[]
+    robotCode?: string
+  }): Promise<any> {
+    const cid = toStr(params.openConversationId)
+    if (!cid) throw new Error('[OpenAPI] openConversationId is required for groupMessages/recall')
+
+    const keys = Array.isArray(params.processQueryKeys) ? params.processQueryKeys.filter(Boolean).map(String) : []
+    if (!keys.length) throw new Error('[OpenAPI] processQueryKeys is required for groupMessages/recall')
+
+    const rc = toStr(params.robotCode || this.robotCode)
+    if (!rc) throw new Error('[OpenAPI] robotCode is required for groupMessages/recall')
+
+    return await this.request('/v1.0/robot/groupMessages/recall', {
+      method: 'POST',
+      body: {
+        openConversationId: cid,
+        processQueryKeys: keys,
+        robotCode: rc,
+      },
+    })
+  }
+
+  async recallOtoMessages (params: {
+    processQueryKeys: string[]
+    robotCode?: string
+  }): Promise<any> {
+    const keys = Array.isArray(params.processQueryKeys) ? params.processQueryKeys.filter(Boolean).map(String) : []
+    if (!keys.length) throw new Error('[OpenAPI] processQueryKeys is required for otoMessages/batchRecall')
+
+    const rc = toStr(params.robotCode || this.robotCode)
+    if (!rc) throw new Error('[OpenAPI] robotCode is required for otoMessages/batchRecall')
+
+    // NOTE: official docs use /v1.0/robot/otoMessages/batchRecall (case-sensitive)
+    return await this.request('/v1.0/robot/otoMessages/batchRecall', {
+      method: 'POST',
+      body: {
+        processQueryKeys: keys,
+        robotCode: rc,
+      },
+    })
+  }
 }
