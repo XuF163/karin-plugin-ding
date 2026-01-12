@@ -5,10 +5,12 @@ import {
   type Elements,
   type NodeElement,
   type SendMsgResults,
+  config as karinConfig,
   contactFriend,
   contactGroup,
   createFriendMessage,
   createGroupMessage,
+  configPath,
   fileToUrl,
   karin,
   senderFriend,
@@ -27,6 +29,47 @@ import { safeJsonParse, toStr, uniq } from './utils'
 import { ProactiveWebhookBinding } from './webhookBinding'
 import { sendWebhookImage, sendWebhookMarkdown, sendWebhookText } from './webhook'
 import { buildDingtalkNoticeEvent, sanitizeEventSegment } from './notice'
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+let ensureKarinConfigCachePromise: Promise<void> | null = null
+
+/**
+ * 防御性兜底：某些启动时序下，node-karin 的 config cache（privates/groups）尚未初始化，
+ * 直接 createFriendMessage/createGroupMessage 会触发空指针。
+ */
+const ensureKarinConfigCacheReady = async () => {
+  if (ensureKarinConfigCachePromise) return ensureKarinConfigCachePromise
+
+  ensureKarinConfigCachePromise = (async () => {
+    const isReady = () => {
+      try {
+        const priv = karinConfig.privates?.()
+        const grp = karinConfig.groups?.()?.get?.()
+        return Boolean(priv && grp)
+      } catch {
+        return false
+      }
+    }
+
+    if (isReady()) return
+
+    // 给核心初始化留一点时间，避免重复 init 造成多重 watch/interval。
+    for (let i = 0; i < 20; i++) {
+      await sleep(50)
+      if (isReady()) return
+    }
+
+    try {
+      karinConfig.initConfigCache(configPath)
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.warn(`[dingtalk] initConfigCache fallback failed: ${msg}`)
+    }
+  })()
+
+  return ensureKarinConfigCachePromise
+}
 
 export class DingTalkBot extends AdapterBase<DWClient> {
   public readonly accountId: string
@@ -258,6 +301,8 @@ export class DingTalkBot extends AdapterBase<DWClient> {
 
     const elements = segmentsToElements(segments)
 
+    await ensureKarinConfigCacheReady()
+
     const scene = toScene(data?.conversationType)
     const messageId = toStr(data?.msgId || streamEvent?.headers?.messageId || `${this.selfId}_${Date.now()}`)
     const createAt = Number(data?.createAt)
@@ -483,7 +528,8 @@ export class DingTalkBot extends AdapterBase<DWClient> {
       const clean = toStr(file).trim()
       if (!clean) return
 
-      const maxWebhookImageBytes = 15 * 1024
+      // DingTalk webhook image(base64+md5) has a strict size limit (~20KB).
+      const maxWebhookImageBytes = 20 * 1024
 
       const tryGetPublicUrl = async (): Promise<string | null> => {
         if (/^https?:\/\//i.test(clean)) return clean

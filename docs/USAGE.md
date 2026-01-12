@@ -44,6 +44,7 @@
   - 本地/Buffer 会尝试通过 `fileToUrl` 转为公网可访问 URL
   - 失败时会自动降级
 - `enablePublicImageBed=false`：发图优先走 `media/upload + OpenAPI sampleImageMsg`（不依赖公网 URL，更适合 NAT 场景）
+  - 适配 Karin 的 `image:base64://...`：会自动推断图片类型并补齐文件后缀（避免 OAPI `illegal file type`）
 
 ## 3. 指令
 
@@ -61,4 +62,6 @@
 
 - 默认 `config/config.json` 中账号 `enable=false`，不会自动连接；请手动开启并填写凭据
 - 撤回仅支持 OpenAPI 发送返回的 `processQueryKey`；Webhook/SessionWebhook 发送没有可撤回的 messageId
+- Webhook 的 `image(base64+md5)` 有严格大小限制（约 20KB），大图建议优先走 OpenAPI 或 “公网 URL + Markdown”
 - 非消息 topic 会透传为 notice 事件：`notice.dingtalk.event.*` / `notice.dingtalk.card.*`（按 topic sanitize 后作为细分事件名）
+- 如遇到 `Cannot read properties of undefined (reading 'Bot:...')`（node-karin 的 `getCacheCfg/getFriendCfg`），通常是 Karin 配置缓存未初始化/配置文件损坏；检查 `@karinjs/config/privates.json`、`@karinjs/config/groups.json` 并重启

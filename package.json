@@ -32,7 +32,9 @@
     "typescript": "^5.5.3"
   },
   "dependencies": {
-    "dingtalk-stream": "^2.1.4"
+    "@karinjs/plugin-puppeteer": "^1.1.2",
+    "dingtalk-stream": "^2.1.4",
+    "karin-plugin-ling": "^1.31.1"
   },
   "karin": {
     "main": "src/index.ts",

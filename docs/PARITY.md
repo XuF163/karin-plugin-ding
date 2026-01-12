@@ -1,6 +1,6 @@
 # 对标核查：`karin-plugin-ding` vs `Yunzai-plugin-Dingtalk`
 
-更新时间：2026-01-11  
+更新时间：2026-01-12  
 参考项目：`tmp/Yunzai-plugin-Dingtalk`（https://github.com/XuF163/Yunzai-plugin-Dingtalk）
 
 ## 结论概览
@@ -8,6 +8,11 @@
 - 已对标：多账号 Stream 接入、ACK-first、消息收发主链路、`sessionWebhook` 缓存、OpenAPI `downloadCode -> downloadUrl`、群固定 webhook 绑定（持久化）、Karin WebUI 配置面板、notice 透传、OpenAPI 撤回
 - 部分对标：主动发送能力（已有基础指令，但未覆盖 Yunzai 的“会话/通讯录”体系）、配置键一致性（缺少 `markdownImgScale/toBotUpload`）
 - 未对标：通讯录缓存持久化（Yunzai 的 contacts 学习/落盘）
+
+## 关键差异 / 注意点
+
+- Webhook 的 `image(base64+md5)` 有严格大小限制（约 20KB），大图请优先走 OpenAPI `media/upload` 或 “公网 URL + Markdown”
+- Karin 的 `image` 段可能是 `base64://...`；已在 `src/dingtalk/file.ts` 通过内容嗅探补齐 `mimeType/文件后缀`，避免 OAPI `illegal file type`
 
 ## 功能对比（摘要）
 
@@ -51,4 +56,3 @@ Karin（当前）：
 - `#ding recall <processQueryKey>`
 - `#ding send group <openConversationId> <text>`
 - `#ding send friend <userId> <text>`
-
